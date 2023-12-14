@@ -1,0 +1,10 @@
+{
+    "files.associations": {
+        "user.h": "c",
+        "types.h": "c",
+        "stat.h": "c",
+        "__config": "c",
+        "dirent.h": "c",
+        "param.h": "c"
+    }
+}
