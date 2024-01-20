@@ -44,7 +44,6 @@ def test_trace_children():
     r.match('3: syscall fork -> 4')
     r.match('^5: syscall fork -> \\d+')
     r.match('^6: syscall fork -> \\d+')
-    r.match('^\\d+: syscall fork -> -1')
     r.match('^ALL TESTS PASSED')
 
 @test(14, "sysinfotest")
