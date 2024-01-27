@@ -81,6 +81,29 @@ int
 sys_pgaccess(void)
 {
   // lab pgtbl: your code here.
+  // get the arg
+  uint64 user_virtual_address;
+  int page_count;
+  uint64 abit;
+
+  argaddr(0, &user_virtual_address);
+  argint(1, &page_count);
+  argaddr(2, &abit);
+
+  pagetable_t page_table = myproc()->pagetable;
+  int res = 0;
+  // iterate throught all pages
+  for (int i = 0; i < 32; i++) {
+    pte_t* pte = walk(page_table, user_virtual_address, 0);
+    if (((*pte) & (PTE_A)) != 0) {
+      res |= (1 << i);
+      *pte &= (~PTE_A);
+    }
+
+    user_virtual_address += PGSIZE;
+  }
+
+  copyout(page_table, abit, (char*)&res, sizeof(res));
   return 0;
 }
 #endif
