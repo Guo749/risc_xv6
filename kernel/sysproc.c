@@ -97,3 +97,25 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64 
+sys_sigalarm(void) {
+  uint64 handler;
+  int tick_threshold;
+  argint(0,&tick_threshold);
+  argaddr(1, &handler);
+
+  myproc()->tick_threshold = tick_threshold;
+  myproc()->handler = handler;
+
+  return 0;
+}
+
+
+uint64 
+sys_sigreturn(void) {
+  struct proc* p = myproc();
+  memmove(p->trapframe, p->save_trap_frame, PGSIZE);
+  myproc()->returned = 1;
+  return 0;
+}

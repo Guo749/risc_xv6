@@ -105,4 +105,10 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+
+  int ticks_count;              // how many ticks so far?
+  int tick_threshold;           // Once reach, we call handler
+  uint64 handler;               // ticks handler
+  struct trapframe* save_trap_frame;       // copy of trapframe 
+  int returned;                 // if the handler call finished, default 1 yes
 };
