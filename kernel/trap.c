@@ -2,7 +2,10 @@
 #include "param.h"
 #include "memlayout.h"
 #include "riscv.h"
+#include "fs.h"
 #include "spinlock.h"
+#include "sleeplock.h"
+#include "file.h"
 #include "proc.h"
 #include "defs.h"
 
@@ -36,51 +39,84 @@ trapinithart(void)
 void
 usertrap(void)
 {
-  int which_dev = 0;
+    int which_dev = 0;
 
-  if((r_sstatus() & SSTATUS_SPP) != 0)
-    panic("usertrap: not from user mode");
+    if((r_sstatus() & SSTATUS_SPP) != 0)
+        panic("usertrap: not from user mode");
 
-  // send interrupts and exceptions to kerneltrap(),
-  // since we're now in the kernel.
-  w_stvec((uint64)kernelvec);
+    // send interrupts and exceptions to kerneltrap(),
+    // since we're now in the kernel.
+    w_stvec((uint64)kernelvec);
 
-  struct proc *p = myproc();
-  
-  // save user program counter.
-  p->trapframe->epc = r_sepc();
-  
-  if(r_scause() == 8){
-    // system call
+    struct proc *p = myproc();
 
+    // save user program counter.
+    p->trapframe->epc = r_sepc();
+
+    if(r_scause() == 8){
+        // system call
+
+        if(p->killed)
+            exit(-1);
+
+        // sepc points to the ecall instruction,
+        // but we want to return to the next instruction.
+        p->trapframe->epc += 4;
+
+        // an interrupt will change sstatus &c registers,
+        // so don't enable until done with those registers.
+        intr_on();
+
+        syscall();
+    } else if((which_dev = devintr()) != 0){
+        // ok
+    } else {
+        uint64 va = PGROUNDDOWN(r_stval());
+        if((r_scause() == 13 || r_scause() == 15) && va >= p->mmap_addr && va < TRAPFRAME){
+            int vma_idx = -1;
+            char* mem;
+            for(int i = 0; i < p->vma_size; i++){
+                if(va >= p->vma[i].addr && va < p->vma[i].addr + p->sz){
+                    vma_idx = i;
+                    break;
+                }
+            }
+            if(vma_idx == -1)
+                goto error;
+            if((mem = kalloc()) == 0){
+                goto error;
+            }
+            memset(mem,0,PGSIZE);
+            struct vma p_vma = p->vma[vma_idx];
+            uint8 RD_flag = p_vma.prot & 0x1;
+            uint8 WR_flag = p_vma.prot & 0x2;
+            uint8 flag = 0;
+            flag = RD_flag ? flag | PTE_R : flag;
+            flag = WR_flag ? flag | PTE_W : flag;
+            if(mappages(p->pagetable, va, PGSIZE, (uint64)mem, flag|PTE_U) != 0){
+                kfree(mem);
+                goto error;
+            }
+            ilock(p_vma.file->ip);
+            readi(p_vma.file->ip, 0, (uint64)mem, va - p_vma.addr + p_vma.offset,PGSIZE);
+            iunlock(p_vma.file->ip);
+            goto done;
+        }
+error:
+        printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
+        printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
+        p->killed = 1;
+    }
+
+done:
     if(p->killed)
-      exit(-1);
+        exit(-1);
 
-    // sepc points to the ecall instruction,
-    // but we want to return to the next instruction.
-    p->trapframe->epc += 4;
+    // give up the CPU if this is a timer interrupt.
+    if(which_dev == 2)
+        yield();
 
-    // an interrupt will change sstatus &c registers,
-    // so don't enable until done with those registers.
-    intr_on();
-
-    syscall();
-  } else if((which_dev = devintr()) != 0){
-    // ok
-  } else {
-    printf("usertrap(): unexpected scause %p pid=%d\n", r_scause(), p->pid);
-    printf("            sepc=%p stval=%p\n", r_sepc(), r_stval());
-    p->killed = 1;
-  }
-
-  if(p->killed)
-    exit(-1);
-
-  // give up the CPU if this is a timer interrupt.
-  if(which_dev == 2)
-    yield();
-
-  usertrapret();
+    usertrapret();
 }
 
 //

@@ -5,6 +5,10 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sleeplock.h"
+#include "fcntl.h"
+#include "fs.h"
+#include "file.h"
 
 struct cpu cpus[NCPU];
 
@@ -119,7 +123,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
-
+  p->mmap_addr = TRAPFRAME;
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
     freeproc(p);
@@ -163,6 +167,16 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  for(int i = 0; i < p->vma_size ; i++){
+      p->vma[i].addr = 0;
+      p->vma[i].sz = 0;
+      p->vma[i].prot = 0;
+      p->vma[i].file = 0;
+      p->vma[i].flags = 0;
+      p->vma[i].offset = 0;
+  }
+  p->mmap_addr = 0;
+  p->vma_size = 0;
   p->state = UNUSED;
 }
 
@@ -272,50 +286,62 @@ growproc(int n)
 int
 fork(void)
 {
-  int i, pid;
-  struct proc *np;
-  struct proc *p = myproc();
+    int i, pid;
+    struct proc *np;
+    struct proc *p = myproc();
 
-  // Allocate process.
-  if((np = allocproc()) == 0){
-    return -1;
-  }
+    // Allocate process.
+    if((np = allocproc()) == 0){
+        return -1;
+    }
 
-  // Copy user memory from parent to child.
-  if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
-    freeproc(np);
+    // Copy user memory from parent to child.
+    if(uvmcopy(p->pagetable, np->pagetable, p->sz) < 0){
+        freeproc(np);
+        release(&np->lock);
+        return -1;
+    }
+    np->sz = p->sz;
+    np->mmap_addr = p->mmap_addr;
+    np->vma_size = p->vma_size;
+
+    for(int i = 0; i < p->vma_size; i++){
+        np->vma[i].addr = p->vma[i].addr;
+        np->vma[i].sz = p->vma[i].sz;
+        np->vma[i].prot = p->vma[i].prot;
+        np->vma[i].flags = p->vma[i].flags;
+        np->vma[i].file = p->vma[i].file;
+        np->vma[i].offset = p->vma[i].offset;
+        if(p->vma[i].sz > 0)
+            filedup(p->vma[i].file);
+    }
+    // copy saved user registers.
+    *(np->trapframe) = *(p->trapframe);
+
+    // Cause fork to return 0 in the child.
+    np->trapframe->a0 = 0;
+
+    // increment reference counts on open file descriptors.
+    for(i = 0; i < NOFILE; i++)
+        if(p->ofile[i])
+            np->ofile[i] = filedup(p->ofile[i]);
+    np->cwd = idup(p->cwd);
+
+    safestrcpy(np->name, p->name, sizeof(p->name));
+
+    pid = np->pid;
+
     release(&np->lock);
-    return -1;
-  }
-  np->sz = p->sz;
 
-  // copy saved user registers.
-  *(np->trapframe) = *(p->trapframe);
+    acquire(&wait_lock);
+    np->parent = p;
+    release(&wait_lock);
 
-  // Cause fork to return 0 in the child.
-  np->trapframe->a0 = 0;
+    acquire(&np->lock);
+    np->state = RUNNABLE;
+    release(&np->lock);
 
-  // increment reference counts on open file descriptors.
-  for(i = 0; i < NOFILE; i++)
-    if(p->ofile[i])
-      np->ofile[i] = filedup(p->ofile[i]);
-  np->cwd = idup(p->cwd);
-
-  safestrcpy(np->name, p->name, sizeof(p->name));
-
-  pid = np->pid;
-
-  release(&np->lock);
-
-  acquire(&wait_lock);
-  np->parent = p;
-  release(&wait_lock);
-
-  acquire(&np->lock);
-  np->state = RUNNABLE;
-  release(&np->lock);
-
-  return pid;
+    return pid;
 }
 
 // Pass p's abandoned children to init.
@@ -343,7 +369,20 @@ exit(int status)
 
   if(p == initproc)
     panic("init exiting");
-
+  for(int i = 0; i < p->vma_size; i++){
+      uint64 unmapsz = p->vma[i].sz;
+      if(unmapsz == 0)
+          continue;
+      if(p->vma[i].flags & MAP_SHARED){
+          begin_op();
+          ilock(p->vma[i].file->ip);
+          writei(p->vma[i].file->ip, 1, p->vma[i].addr , p->vma[i].offset, unmapsz);
+          iunlock(p->vma[i].file->ip);
+          end_op();
+      }
+      fileclose(p->vma[i].file);
+      uvmunmap(p->pagetable,p->vma[i].addr,p->vma[i].sz/PGSIZE,1);
+  }
   // Close all open files.
   for(int fd = 0; fd < NOFILE; fd++){
     if(p->ofile[fd]){
@@ -357,7 +396,7 @@ exit(int status)
   iput(p->cwd);
   end_op();
   p->cwd = 0;
-
+  
   acquire(&wait_lock);
 
   // Give any children to init.
